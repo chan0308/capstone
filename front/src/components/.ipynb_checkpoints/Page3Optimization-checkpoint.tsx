@@ -15,6 +15,8 @@ import {
   Legend,
   LineChart,
   Line,
+  ReferenceDot, // ✅ 메모용
+  Cell,
 } from "recharts";
 
 type CoqRatio = {
@@ -36,8 +38,14 @@ type RadarItem = {
 };
 
 type ImprovementStep = {
-  step: string;
+  stepIndex: number;
+  stepLabel: string;
   coq: number;
+};
+
+type AnnotationPoint = {
+  x: number;
+  y: number;
   label: string;
 };
 
@@ -70,13 +78,15 @@ function clamp01(x: number): number {
 export default function Page3Optimization() {
   const [coq, setCoq] = useState<CoqRatio>(INITIAL_COQ);
 
-  const handleSliderChange = (key: keyof CoqRatio) =>
+  const handleSliderChange =
+    (key: keyof CoqRatio) =>
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const v = Number(e.target.value);
       setCoq((prev) => ({ ...prev, [key]: clamp01(v) }));
     };
 
   const coqBarData: CoqBarItem[] = [
+    { name: "COQ ratio", value: calcTotalCoq(coq) },
     { name: "P", value: coq.p },
     { name: "A", value: coq.a },
     { name: "F", value: coq.f },
@@ -109,10 +119,37 @@ export default function Page3Optimization() {
     },
   ];
 
+  // Which change reduces COQ the most? 데이터
   const improvementSteps: ImprovementStep[] = [
-    { step: "현재", coq: 1.53, label: "기준 COQ" },
-    { step: "A 조정", coq: 1.31, label: "A 10% 감소" },
-    { step: "P 조정", coq: 1.19, label: "P 5% 증가" },
+    { stepIndex: 0, stepLabel: "현재", coq: 1.53 },
+    { stepIndex: 1, stepLabel: "A 조정", coq: 1.31 },
+    { stepIndex: 2, stepLabel: "P 조정", coq: 1.19 },
+  ];
+
+  const annotationPoints: AnnotationPoint[] = [
+    {
+      x: 0.5,
+      y: (1.53 + 1.31) / 2,
+      label: "▼ A -10%",
+    },
+    {
+      x: 1.5,
+      y: (1.31 + 1.19) / 2,
+      label: "▼ P -5%",
+    },
+  ];
+
+  const stepLabelMap: Record<number, string> = {
+    0: "현재",
+    1: "A 조정",
+    2: "P 조정",
+  };
+
+  // What drives bad COQ? 데이터 (색 포함)
+  const driverData = [
+    { name: "Prevention", value: 0.9, fill: "#9ca3af" }, // 회색
+    { name: "Appraisal", value: 1.6, fill: "#ef4444" },  // 빨강
+    { name: "Failure", value: -1.8, fill: "#22c55e" },   // 연두
   ];
 
   return (
@@ -156,7 +193,7 @@ export default function Page3Optimization() {
             COQ Optimizing Simulation
           </h2>
           <div className="grid grid-cols-[minmax(0,2fr)_220px] gap-6">
-            {/* Bar chart */}
+            {/* COQ ratio + P/A/F 수평 막대 */}
             <div>
               <ResponsiveContainer width="100%" height={220}>
                 <BarChart data={coqBarData} layout="vertical">
@@ -167,7 +204,7 @@ export default function Page3Optimization() {
                   />
                   <XAxis
                     type="number"
-                    domain={[0, 1]}
+                    domain={[0, 2]}
                     stroke="#9ca3af"
                     tick={{ fontSize: 10 }}
                   />
@@ -175,8 +212,8 @@ export default function Page3Optimization() {
                     type="category"
                     dataKey="name"
                     stroke="#4b5563"
-                    width={40}
-                    tick={{ fontSize: 12, fontWeight: 600 }}
+                    width={60}
+                    tick={{ fontSize: 11, fontWeight: 600 }}
                   />
                   <Tooltip
                     contentStyle={{
@@ -343,30 +380,21 @@ export default function Page3Optimization() {
             </div>
             <div>
               <ResponsiveContainer width="100%" height={220}>
-                <BarChart
-                  data={[
-                    { name: "Prevention", value: 1 },
-                    { name: "Appraisal", value: 2 },
-                    { name: "Failure", value: -2 },
-                  ]}
-                  layout="vertical"
-                >
+                <BarChart data={driverData}>
                   <CartesianGrid
                     strokeDasharray="3 3"
                     stroke="#e5e5e5"
-                    horizontal={false}
+                    vertical={false}
                   />
                   <XAxis
-                    type="number"
-                    stroke="#9ca3af"
-                    tick={{ fontSize: 10 }}
+                    dataKey="name"
+                    stroke="#6b7280"
+                    tick={{ fontSize: 11 }}
                   />
                   <YAxis
-                    type="category"
-                    dataKey="name"
-                    stroke="#4b5563"
-                    width={60}
-                    tick={{ fontSize: 11, fontWeight: 600 }}
+                    stroke="#9ca3af"
+                    tick={{ fontSize: 10 }}
+                    domain={[-2.2, 2.2]}
                   />
                   <Tooltip
                     contentStyle={{
@@ -374,7 +402,11 @@ export default function Page3Optimization() {
                       borderRadius: 12,
                     }}
                   />
-                  <Bar dataKey="value" radius={[4, 4, 4, 4]} fill="#6b7280" />
+                  <Bar dataKey="value">
+                    {driverData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.fill} />
+                    ))}
+                  </Bar>
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -392,9 +424,15 @@ export default function Page3Optimization() {
                 <LineChart data={improvementSteps}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e5e5e5" />
                   <XAxis
-                    dataKey="step"
+                    type="number"
+                    dataKey="stepIndex"
+                    domain={[0, 2]}
+                    ticks={[0, 1, 2]}
                     stroke="#6b7280"
                     tick={{ fontSize: 11 }}
+                    tickFormatter={(v) =>
+                      stepLabelMap[Math.round(v as number)] ?? ""
+                    }
                   />
                   <YAxis
                     stroke="#9ca3af"
@@ -406,13 +444,40 @@ export default function Page3Optimization() {
                       fontSize: 12,
                       borderRadius: 12,
                     }}
+                    formatter={(value: any) => [value, "COQ"]}
                   />
                   <Line
                     type="monotone"
                     dataKey="coq"
                     stroke="#ef4444"
                     strokeWidth={2}
-                    dot={{ r: 4 }}
+                    dot={{ r: 4, stroke: "#111827", fill: "#111827" }}
+                    activeDot={{ r: 5, stroke: "#111827", fill: "#111827" }}
+                  />
+                  {/* 선분 중앙에 메모 */}
+                  <ReferenceDot
+                    x={annotationPoints[0].x}
+                    y={annotationPoints[0].y}
+                    r={0}
+                    isFront
+                    label={{
+                      value: annotationPoints[0].label,
+                      position: "top",
+                      fill: "#ef4444",
+                      fontSize: 12,
+                    }}
+                  />
+                  <ReferenceDot
+                    x={annotationPoints[1].x}
+                    y={annotationPoints[1].y}
+                    r={0}
+                    isFront
+                    label={{
+                      value: annotationPoints[1].label,
+                      position: "top",
+                      fill: "#ef4444",
+                      fontSize: 12,
+                    }}
                   />
                 </LineChart>
               </ResponsiveContainer>
