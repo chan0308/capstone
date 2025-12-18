@@ -1,0 +1,4 @@
+front/node_modules/
+backend/.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+.DS_Store

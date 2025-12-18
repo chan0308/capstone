@@ -5,7 +5,7 @@ FSD Research Assistant용 분석 파이프라인 모듈 (경량 버전)
 기능:
 1) 키워드 리스트를 받아 Reddit 검색 API(JSON)을 통해 크롤링
 2) 크롤링된 텍스트에 대해 감성 점수 계산(VADER)
-3) 감성 점수 기반으로 5개 토픽(Safety/Recall/Collision/Autopilot/Quality)별 평균 점수 산출
+3) 감성 점수 기반으로 키워드별 평균 점수 산출(상위 5개)
 4) LDA 토픽 모델링으로 이슈 키워드 묶음 추출
 5) LangGraph 쪽에서는 이 모듈의 최상위 함수만 하나의 "툴"처럼 호출
 
@@ -44,7 +44,7 @@ CANDIDATE_KEYWORDS = [
     "리콜", "조사", "허가", "캘리포니아",
 ]
 
-# 차트에 쓸 5개 토픽과 키워드 매핑(대략적인 예시)
+# (과거 버전에서 쓰던 하드코딩 토픽 매핑 – 지금은 사용하지 않지만 참고용으로 남겨둠)
 TOPIC_KEYWORDS = {
     "Safety": ["safety", "안전", "crash", "collision", "사고", "충돌"],
     "Recall": ["recall", "리콜"],
@@ -56,9 +56,9 @@ TOPIC_KEYWORDS = {
 
 @dataclass
 class SentimentRow:
-    topic: str
+    topic: str          # 여기서는 "keyword" 값이 그대로 topic이 됨
     score: float
-    sentiment: str  # "Negative" | "Mixed" | "Neutral" | "Positive"
+    sentiment: str      # "Negative" | "Neutral" | "Positive"
 
 
 # ----- 1. Reddit 크롤링 (requests 기반, 동기) -----
@@ -187,43 +187,43 @@ def run_sentiment(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ----- 3. 차트용 5개 토픽으로 집계 -----
+# ----- 3. 차트용 키워드별 집계 -----
 
 def _score_to_label(score: float) -> str:
     """
-    -1 ~ +1 감성 점수를 라벨로 변환하는 간단한 규칙.
+    -1 ~ +1 감성 점수를 3단계(부정/중립/긍정) 라벨로 변환.
     """
     if score < -0.2:
         return "Negative"
-    if score < 0.1:
-        return "Mixed"
-    if score < 0.3:
-        return "Neutral"
-    return "Positive"
+    if score > 0.2:
+        return "Positive"
+    return "Neutral"
 
 
 def aggregate_to_topics(df: pd.DataFrame) -> List[SentimentRow]:
     """
-    TOPIC_KEYWORDS에 따라 게시글을 5개 토픽으로 매핑하고,
-    각 토픽별 평균 sentiment_score를 계산.
+    DataFrame의 'keyword' 컬럼 기준으로 묶어서
+    각 키워드별 평균 sentiment_score를 계산하고,
+    감성 강도가 큰 순으로 상위 5개만 반환.
     """
     rows: List[SentimentRow] = []
 
-    for topic, keywords in TOPIC_KEYWORDS.items():
-        if df.empty:
-            avg = 0.0
-        else:
-            pattern = "|".join(re.escape(k) for k in keywords)
-            mask = df["text"].str.contains(pattern, case=False, na=False)
-            if mask.any():
-                avg = float(df.loc[mask, "sentiment_score"].mean())
-            else:
-                avg = 0.0
+    if df.empty or "keyword" not in df.columns or "sentiment_score" not in df.columns:
+        return rows
 
+    grouped = df.groupby("keyword")
+
+    for kw, g in grouped:
+        if not isinstance(kw, str) or not kw.strip():
+            continue
+
+        avg = float(g["sentiment_score"].mean())
         label = _score_to_label(avg)
-        rows.append(SentimentRow(topic=topic, score=avg, sentiment=label))
+        rows.append(SentimentRow(topic=kw, score=avg, sentiment=label))
 
-    return rows
+    # 감성 강도가 큰 순(|score|)으로 정렬 후 상위 5개 사용
+    rows.sort(key=lambda r: abs(r.score), reverse=True)
+    return rows[:5]
 
 
 # ----- 4. LDA 토픽 모델링 -----
@@ -279,7 +279,7 @@ def analyze_market_sentiment(
 
     1) selected_keywords 로 Reddit 검색(JSON) 크롤링
     2) 감성 분석(VADER)
-    3) 토픽별 평균 점수 → 바 차트용 데이터 생성
+    3) 키워드별 평균 점수 → 바 차트용 데이터 생성
     4) LDA 토픽 추출
     """
     # 1) 크롤링
@@ -288,7 +288,7 @@ def analyze_market_sentiment(
     # 2) 감성 분석
     df_scored = run_sentiment(df_raw)
 
-    # 3) 5개 토픽으로 집계
+    # 3) 키워드별 집계 (상위 5개)
     topic_rows = aggregate_to_topics(df_scored)
     sentiment_chart = [
         {

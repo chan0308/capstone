@@ -98,16 +98,59 @@ class ChatState(TypedDict):
 # ------------------------------------------------------------
 # 2. 실제로 실행될 "툴" – 크롤링 + 감성분석 + LDA
 # ------------------------------------------------------------
-
 def crawl_market_sentiment(
     question: str,
     selected_keywords: List[str],
     llm,  # LangGraph에서 쓰는 LLM 인스턴스 (예: ChatOllama)
 ) -> Dict[str, Any]:
-    ...
+    """
+    Reddit 크롤링 + 감성 분석 + LDA를 수행하고,
+    LLM이 읽기 쉬운 텍스트 블록과 차트용 데이터를 만들어 반환.
+    """
+
+    # 1) fsd_tools.analyze_market_sentiment 호출
+    try:
+        tool_result = analyze_market_sentiment(
+            user_query=question,
+            selected_keywords=selected_keywords,
+            max_posts=40,
+        )
+    except Exception as e:
+        print(f"[fsd_graph] analyze_market_sentiment 실패, 기본값 사용: {e}")
+        sentiment_chart = DEFAULT_SENTIMENT_CHART
+        lda_topics: List[Dict[str, Any]] = []
+        raw_count = 0
+    else:
+        sentiment_chart = tool_result.get("sentiment_chart", DEFAULT_SENTIMENT_CHART)
+        lda_topics = tool_result.get("lda_topics", []) or []
+        raw_count = tool_result.get("raw_count", 0)
+
+    # 2) 토픽별 감성 점수 블록 문자열 만들기
+    topic_lines: List[str] = []
+    for row in sentiment_chart:
+        topic = row.get("topic", "")
+        score = row.get("score", 0.0)
+        sentiment = row.get("sentiment", "")
+        try:
+            score_f = float(score)
+            score_str = f"{score_f:+.2f}"
+        except Exception:
+            score_str = str(score)
+        topic_lines.append(f"- {topic}: {score_str} ({sentiment})")
+
+    topic_block = "\n".join(topic_lines) if topic_lines else "(no topic scores)"
+
+    # 3) LDA 토픽 키워드 블록 만들기  ← ★ 여기서 lda_lines 를 정의
+    lda_lines: List[str] = []
+    for t in lda_topics:
+        tid = t.get("topic_id", 0)
+        keywords = t.get("keywords", []) or []
+        kws_str = ", ".join(keywords)
+        lda_lines.append(f"- Topic {tid + 1}: {kws_str}")
+
     lda_block = "\n".join(lda_lines) if lda_lines else "(no clear LDA topics)"
 
-    # 🔽 여기부터 프롬프트를 한국어 버전으로 교체
+    # 4) LLM에게 넘길 한국어 프롬프트
     prompt = f"""
 너는 테슬라 FSD(Full Self-Driving)/로보택시에 대한
 시장 인식과 안전 이슈를 분석하는 리서치 보조원이다.
@@ -139,7 +182,7 @@ def crawl_market_sentiment(
 형식:
 - bullet point 위주로 4~6줄 정도의 간결한 요약
 - 과도한 수식어는 피하고, 분석적인 톤을 유지할 것
-"""
+""".strip()
 
     llm_answer = llm.invoke(prompt).content
 
@@ -148,6 +191,7 @@ def crawl_market_sentiment(
         "sentiment_chart": sentiment_chart,
         "lda_topics": lda_topics,
     }
+
 
 
 TOOLS = {

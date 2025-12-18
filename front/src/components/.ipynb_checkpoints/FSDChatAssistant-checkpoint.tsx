@@ -97,7 +97,7 @@ export default function FSDChatAssistant({ onUpdateSentiment }: Props) {
           </div>
           <div>
             <h3 className="text-lg font-semibold text-black">
-              FSD Research Assistant
+              Sentiment Research Assistant
             </h3>
             <p className="text-xs text-gray-500">
               FSD 안전, 사고, 시장 인식에 대해 질문해 보세요.
