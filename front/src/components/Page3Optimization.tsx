@@ -1,703 +1,649 @@
+// src/components/Page3Optimization.tsx
 import { useEffect, useMemo, useState } from "react";
-import { motion } from "motion/react";
+import type React from "react";
+import * as XLSX from "xlsx";
 import {
-  AreaChart,
-  Area,
-  LineChart,
-  Line,
+  BarChart,
+  Bar,
   XAxis,
   YAxis,
-  CartesianGrid,
   Tooltip,
+  CartesianGrid,
   ResponsiveContainer,
-  PieChart,
-  Pie,
+  LineChart,
+  Line,
+  ReferenceLine,
+  RadarChart,
+  Radar,
+  PolarGrid,
+  PolarAngleAxis,
+  PolarRadiusAxis,
   Cell,
 } from "recharts";
-import { ArrowUpRight, ArrowDownRight } from "lucide-react";
-import * as XLSX from "xlsx";
-import { buildYearTicks, loadCoqFromXlsx, type PAFPoint } from "../lib/coqLoader";
 
-// 오른쪽 최적 비율 카드용 컴포넌트
-interface RatioCardProps {
-  label: string;
-  value: string;
-  delta: string;
-  direction: "up" | "down";
-}
+type Coq4 = { p: number; a: number; if: number; of: number };
 
-function RatioCard({ label, value, delta, direction }: RatioCardProps) {
-  const isUp = direction === "up";
-  const colorClass = isUp ? "text-red-500" : "text-blue-500";
-  const bgClass = "bg-white";
-
-  return (
-    <div className={`${bgClass} rounded-2xl shadow-md px-5 py-4 flex items-center justify-between`}>
-      <div className="flex flex-col gap-1">
-        <span className="text-xs text-gray-500 font-medium">{label}</span>
-        <span className="text-2xl font-bold text-black">{value}</span>
-      </div>
-      <div className="flex items-center gap-2 rounded-2xl bg-gray-50 px-3 py-2 shadow-sm">
-        <div className="w-8 h-5 flex items-center justify-center">
-          {isUp ? (
-            <ArrowUpRight className="w-4 h-4 text-red-500" />
-          ) : (
-            <ArrowDownRight className="w-4 h-4 text-blue-500" />
-          )}
-        </div>
-        <span className={`text-xs font-semibold ${colorClass}`}>{delta}</span>
-      </div>
-    </div>
-  );
-}
-
-function fmtRatio(n: number) {
-  if (!Number.isFinite(n)) return "0";
-  return n.toFixed(2).replace(/\.00$/, "");
-}
-
-function fmtDeltaPct(n: number) {
-  if (!Number.isFinite(n)) return "0.0%";
-  const sign = n > 0 ? "+" : "";
-  return `${sign}${n.toFixed(1)}%`;
-}
-
-/** ===== (추가) Efficiency용 타입 ===== */
-type EfficiencyPoint = {
-  date: Date;
-  monthLabel: string;
-  efficiency: number;
+type Sheet2Row = {
+  key: "P" | "A" | "IF" | "OF";
+  current: number;
+  optimal: number;
 };
+type CurveRow = { p: number; a: number; if: number; of: number; coq: number };
+type SensRow = { name: string; value: number };
 
-type TimelineItem = {
-  year: number;
-  status: "개선" | "중립" | "안정";
-};
-
-// "Apr 20" 형태
-function monthLabelFromDate(d: Date) {
-  const mon = d.toLocaleString("en-US", { month: "short" });
-  const yy = String(d.getFullYear()).slice(-2);
-  return `${mon} ${yy}`;
+function clamp01(x: number) {
+  return Math.min(1, Math.max(0, x));
+}
+function safeNum(v: any): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
 }
 
-// 엑셀 날짜/문자/숫자 모두 파싱
-function parseMonthLike(v: any): Date | null {
-  if (v == null || v === "") return null;
+async function loadXlsxFromPublic(url: string) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`XLSX fetch failed: ${res.status}`);
+  const buf = await res.arrayBuffer();
+  const wb = XLSX.read(buf, { type: "array" });
+  return wb;
+}
 
-  if (v instanceof Date && Number.isFinite(v.getTime())) return v;
-
-  // excel serial number
-  if (typeof v === "number" && Number.isFinite(v)) {
-    const excelEpoch = new Date(Date.UTC(1899, 11, 30));
-    const ms = v * 24 * 60 * 60 * 1000;
-    const d = new Date(excelEpoch.getTime() + ms);
-    return Number.isFinite(d.getTime()) ? d : null;
-  }
-
-  const s = String(v).trim();
-  if (!s) return null;
-
-  // "2025-01-20" 같은 ISO
-  const dIso = new Date(s);
-  if (Number.isFinite(dIso.getTime())) return dIso;
-
-  // "Jan 20" / "Jan-20"
-  const m1 = s.match(/^([A-Za-z]{3,})[\s\-_/]*([0-9]{2})$/);
-  if (m1) {
-    const monStr = m1[1].slice(0, 3).toLowerCase();
-    const yy = Number(m1[2]);
-    const yyyy = 2000 + yy;
-    const monMap: Record<string, number> = {
-      jan: 0,
-      feb: 1,
-      mar: 2,
-      apr: 3,
-      may: 4,
-      jun: 5,
-      jul: 6,
-      aug: 7,
-      sep: 8,
-      oct: 9,
-      nov: 10,
-      dec: 11,
-    };
-    if (monStr in monMap) {
-      const d = new Date(yyyy, monMap[monStr], 1);
-      return Number.isFinite(d.getTime()) ? d : null;
-    }
-  }
-
-  return null;
+function sheetToRows(wb: XLSX.WorkBook, sheetName: string) {
+  const ws = wb.Sheets[sheetName];
+  if (!ws) return [];
+  return XLSX.utils.sheet_to_json<any[]>(ws, { header: 1, raw: true }) as any[];
 }
 
 /**
- * ✅ COQ Efficiency tick 규칙
- * - Jan-2020
- * - 2021, 2022, 2023, 2024, 2025 (각 연도 1월 포인트가 있으면 그걸 tick)
- * - Apr-2025(마지막 포인트)
+ * ✅ 사진(요구)대로 고정할 전략 그래프 데이터
  */
-function buildEfficiencyTicks(points: EfficiencyPoint[]) {
-  if (!points.length) return [] as string[];
+const FIXED_STRATEGY_SERIES = [
+  { step: 0, label: "Current", coq: 1.4 },
+  { step: 1, label: "1. A\n최적화", coq: 1.39 },
+  { step: 2, label: "2. A + P\n최적화", coq: 1.39 },
+  { step: 3, label: "3. A+P+IF\n최적화", coq: 1.39 },
+  { step: 4, label: "4. A+P+IF+OF\n최적화", coq: 1.22 },
+] as const;
 
-  const sorted = [...points].sort((a, b) => a.date.getTime() - b.date.getTime());
-  const firstYear = sorted[0].date.getFullYear();
-  const lastYear = sorted[sorted.length - 1].date.getFullYear();
+const FIXED_STRATEGY_CARDS = {
+  current: 0.4,
+  strategy4: 0.18,
+  saved: 0.22,
+};
 
-  const startY = Math.min(2020, firstYear);
-  const endY = Math.max(2025, lastYear);
+/**
+ * ✅ 사진(요구)대로 고정할 "민감도" 그래프 (2번 사진)
+ */
+const FIXED_SENSITIVITY = [
+  { name: "Prevention", value: 0.02 },
+  { name: "Appraisal", value: 0.03 },
+  { name: "Internal Failure", value: 0.01 },
+  { name: "External Failure", value: 0.4 },
+] as const;
 
-  const ticks: string[] = [];
+const FIXED_TOP_DRIVER = "TBD";
 
-  for (let y = startY; y <= endY; y++) {
-    const jan = sorted.find((p) => p.date.getFullYear() === y && p.date.getMonth() === 0);
-    if (jan) ticks.push(jan.monthLabel);
-    else {
-      const first = sorted.find((p) => p.date.getFullYear() === y);
-      if (first) ticks.push(first.monthLabel);
-    }
-  }
+/** ✅ 시뮬레이션 바 색 (2번 사진 톤) */
+const SIM_BAR_COLORS = {
+  red: "#ef4444", // COQ ratio
+  light: "#d1d5db", // P/A (연한 회색)
+  dark: "#6b7280", // IF/OF (진한 회색)
+};
 
-  const last = sorted[sorted.length - 1].monthLabel;
-  if (ticks[ticks.length - 1] !== last) ticks.push(last);
-
-  return Array.from(new Set(ticks));
+function simBarFill(name: string) {
+  if (name === "COQ ratio") return SIM_BAR_COLORS.red;
+  if (name === "IF" || name === "OF") return SIM_BAR_COLORS.dark;
+  return SIM_BAR_COLORS.light; // P, A
 }
 
-/** ✅ 분위수 기준 분류 */
-const Q33 = 1.889647;
-const Q66 = 2.485925;
+/**
+ * ✅ optimal(초록)은 완전 고정 (슬라이더로 절대 변하면 안됨)
+ * ✅ current(빨강)만 슬라이더 연동
+ */
+const FIXED_OPTIMAL_RADAR: Coq4 = { p: 0.16, if: 0.10, a: 0.14, of: 0.11 } as const;
 
-function classifyEfficiency(avg: number): "개선" | "중립" | "안정" {
-  if (!Number.isFinite(avg)) return "중립";
-  if (avg <= Q33) return "개선";
-  if (avg <= Q66) return "중립";
-  return "안정";
-}
+// 레이더 스케일 고정(마름모 “작아지는” 문제 해결용)
+const RADAR_DOMAIN_MAX = 0.22;
 
-/** ✅ Sheet5 컬럼 자동 탐지 (연도/평균/분류) */
-function normalizeKey(k: string) {
-  return String(k).replace(/\s+/g, "").toLowerCase();
-}
-function pickYearKey(row: any) {
-  const keys = Object.keys(row || {});
-  // 숫자 2020~2025 같은 값을 가진 키 우선
-  for (const k of keys) {
-    const v = Number(row[k]);
-    if (Number.isFinite(v) && v >= 1900 && v <= 2100) return k;
-  }
-  // 그래도 못 찾으면 키 이름으로 추정
-  const byName =
-    keys.find((k) => normalizeKey(k).includes("year")) ??
-    keys.find((k) => normalizeKey(k).includes("연도")) ??
-    keys.find((k) => normalizeKey(k).includes("unnamed:0"));
-  return byName ?? null;
-}
-function pickAvgKey(row: any) {
-  const keys = Object.keys(row || {});
-  return (
-    keys.find((k) => normalizeKey(k).includes("평균")) ??
-    keys.find((k) => normalizeKey(k).includes("average")) ??
-    keys.find((k) => normalizeKey(k).includes("avg")) ??
-    null
-  );
-}
-function pickClassKey(row: any) {
-  const keys = Object.keys(row || {});
-  return (
-    keys.find((k) => normalizeKey(k).includes("분류")) ??
-    keys.find((k) => normalizeKey(k).includes("class")) ??
-    keys.find((k) => normalizeKey(k).includes("label")) ??
-    null
-  );
-}
-function parseStatus(v: any): "개선" | "중립" | "안정" | null {
-  const s = String(v ?? "").trim();
-  if (!s) return null;
-  if (s.includes("개선")) return "개선";
-  if (s.includes("중립")) return "중립";
-  if (s.includes("안정")) return "안정";
-  return null;
-}
+// 빨강(현재) Prevention만 살짝 부스트(“북쪽으로 튀어나오게”)
+const CURRENT_P_BUMP = 1.08;
 
-export default function Page1COQOverview() {
-  const [pafData, setPafData] = useState<PAFPoint[]>([]);
-  const [recentPieData, setRecentPieData] = useState<{ name: string; value: number }[]>([]);
-  const [kpi, setKpi] = useState({
-    P_avg: 0,
-    A_avg: 0,
-    F_avg: 0,
-    P_deltaPct: 0,
-    A_deltaPct: 0,
-    F_deltaPct: 0,
-  });
+export default function Page3Optimization() {
   const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
-  // ✅✅✅ COQ Efficiency / Timeline state
-  const [efficiencyData, setEfficiencyData] = useState<EfficiencyPoint[]>([]);
-  const [efficiencyTicks, setEfficiencyTicks] = useState<string[]>([]);
-  const [timeline, setTimeline] = useState<TimelineItem[]>([]);
+  // XLSX에서 읽은 핵심 데이터들
+  const [curOpt, setCurOpt] = useState<{ current: Coq4; optimal: Coq4 } | null>(null);
+  const [curveRows, setCurveRows] = useState<CurveRow[]>([]);
+  const [sensitivity, setSensitivity] = useState<SensRow[]>([]);
 
-  // ✅ 여기 파일 경로만 맞추면 됨 (public 아래)
-  const XLSX_URL = "/IFOF.coq_efficiency_summary.xlsx";
+  // UI용 슬라이더 (시뮬레이션 차트용)
+  const [p, setP] = useState(0.12);
+  const [a, setA] = useState(0.44);
+  const [f, setF] = useState(0.28);
+
+  // ✅✅✅ Key Insights 3줄(각 textarea에 하나씩)
+  const KEY_INSIGHTS = useMemo(
+    () => [
+      "네가지 품질변수를 모두 최적화할 경우 COQ 최소점은 현재보다 0.18 감소함",
+      "최적화 결과, Prevention·Appraisal 비중은 감소하고 Failure(IF·OF) 비중은 상대적으로 증가하는 구조가 도출됨",
+      "사후실패비용이 가장 영향력 있는 변수로서 최적화 성과를 좌우함",
+    ],
+    []
+  );
 
   useEffect(() => {
-    let alive = true;
-
     (async () => {
       try {
         setLoading(true);
+        setErr(null);
 
-        // ===== 기존(P/A/F) 로딩 =====
-        const { pafAll, recent } = await loadCoqFromXlsx(XLSX_URL);
+        const wb = await loadXlsxFromPublic("/Page3_input.xlsx");
 
-        if (!alive) return;
-
-        setPafData(pafAll);
-        setRecentPieData(recent.recentPie);
-
-        // ✅✅✅ delta 3개 고정 표시
-        setKpi({
-          P_avg: recent.P_avg,
-          A_avg: recent.A_avg,
-          F_avg: recent.F_avg,
-          P_deltaPct: 1.6,
-          A_deltaPct: -4.7,
-          F_deltaPct: 5.5,
-        });
-
-        // ===== Sheet4/5 로딩 =====
-        const res = await fetch(XLSX_URL);
-        if (!res.ok) throw new Error(`Failed to fetch xlsx: ${res.status}`);
-        const buf = await res.arrayBuffer();
-        const wb = XLSX.read(buf, { type: "array" });
-
-        // ---- Sheet4: MONTH / COQ_Efficiency ----
-        const s4 = wb.Sheets["Sheet4"];
-        if (s4) {
-          const rows = XLSX.utils.sheet_to_json<any>(s4, { defval: null });
-
-          const points: EfficiencyPoint[] = rows
-            .map((r) => {
-              const d = parseMonthLike(r["MONTH"] ?? r["Month"] ?? r["month"]);
-              const eff = Number(
-                r["COQ_Efficiency"] ??
-                  r["COQ Efficiency"] ??
-                  r["efficiency"] ??
-                  r["Efficiency"]
-              );
-              if (!d || !Number.isFinite(eff)) return null;
-
-              const date = new Date(d.getFullYear(), d.getMonth(), 1);
-              return {
-                date,
-                monthLabel: monthLabelFromDate(date),
-                efficiency: eff,
-              } as EfficiencyPoint;
-            })
-            .filter(Boolean) as EfficiencyPoint[];
-
-          points.sort((a, b) => a.date.getTime() - b.date.getTime());
-
-          if (alive) {
-            setEfficiencyData(points);
-            setEfficiencyTicks(buildEfficiencyTicks(points));
+        // ---------- Sheet2: 현재 vs 최적 ----------
+        const s2 = sheetToRows(wb, "Sheet2");
+        const s2data: Sheet2Row[] = [];
+        for (let i = 1; i < s2.length; i++) {
+          const row = s2[i];
+          const k = String(row?.[0] ?? "").toUpperCase();
+          if (k === "P" || k === "A" || k === "IF" || k === "OF") {
+            s2data.push({
+              key: k as any,
+              current: safeNum(row?.[1]),
+              optimal: safeNum(row?.[2]),
+            });
           }
         }
 
-        // ---- ✅ Sheet5: "연도 / 평균 / 분류"를 자동으로 찾아서 그대로 표시 ----
-        const s5 = wb.Sheets["Sheet5"];
-        if (s5) {
-          const rows = XLSX.utils.sheet_to_json<any>(s5, { defval: null });
+        const current: Coq4 = {
+          p: s2data.find((x) => x.key === "P")?.current ?? 0,
+          a: s2data.find((x) => x.key === "A")?.current ?? 0,
+          if: s2data.find((x) => x.key === "IF")?.current ?? 0,
+          of: s2data.find((x) => x.key === "OF")?.current ?? 0,
+        };
+        const optimal: Coq4 = {
+          p: s2data.find((x) => x.key === "P")?.optimal ?? 0,
+          a: s2data.find((x) => x.key === "A")?.optimal ?? 0,
+          if: s2data.find((x) => x.key === "IF")?.optimal ?? 0,
+          of: s2data.find((x) => x.key === "OF")?.optimal ?? 0,
+        };
+        setCurOpt({ current, optimal });
 
-          const items: TimelineItem[] = rows
-            .map((r) => {
-              const yearKey = pickYearKey(r);
-              if (!yearKey) return null;
+        // ✅ 초기 슬라이더는 “합이 1 넘지 않게” 한 번 정리해서 세팅
+        const curFail = (current.if ?? 0) + (current.of ?? 0);
+        const p0 = clamp01(current.p);
+        const a0 = clamp01(current.a);
+        const f0 = clamp01(curFail);
 
-              const year = Number(r[yearKey]);
-              if (!Number.isFinite(year) || year < 1900 || year > 2100) return null;
-
-              const classKey = pickClassKey(r);
-              const avgKey = pickAvgKey(r);
-
-              // 1) Sheet5에 이미 "COQ 효율성 분류"가 있으면 그걸 그대로 사용
-              const statusFromSheet = classKey ? parseStatus(r[classKey]) : null;
-              if (statusFromSheet) return { year, status: statusFromSheet };
-
-              // 2) 분류 컬럼이 없으면 평균으로 분위수 분류
-              const avg = avgKey ? Number(r[avgKey]) : NaN;
-              const status = classifyEfficiency(avg);
-              return { year, status };
-            })
-            .filter(Boolean) as TimelineItem[];
-
-          items.sort((a, b) => a.year - b.year);
-
-          if (alive) {
-            // ✅ 그래도 비면(구조가 더 깨져있으면) 3번 사진 결과로 fallback
-            setTimeline(
-              items.length
-                ? items
-                : [
-                    { year: 2020, status: "안정" },
-                    { year: 2021, status: "안정" },
-                    { year: 2022, status: "중립" },
-                    { year: 2023, status: "개선" },
-                    { year: 2024, status: "중립" },
-                    { year: 2025, status: "개선" },
-                  ]
-            );
-          }
+        const sum0 = p0 + a0 + f0;
+        if (sum0 > 1) {
+          const scale = 1 / sum0;
+          setP(p0 * scale);
+          setA(a0 * scale);
+          setF(f0 * scale);
         } else {
-          // Sheet5 자체가 없으면 fallback
-          if (alive) {
-            setTimeline([
-              { year: 2020, status: "안정" },
-              { year: 2021, status: "안정" },
-              { year: 2022, status: "중립" },
-              { year: 2023, status: "개선" },
-              { year: 2024, status: "중립" },
-              { year: 2025, status: "개선" },
-            ]);
-          }
+          setP(p0);
+          setA(a0);
+          setF(f0);
         }
-      } catch (e) {
-        console.error(e);
-        // 오류 나도 Timeline은 3번 사진 값으로 보여주기
-        if (alive) {
-          setTimeline([
-            { year: 2020, status: "안정" },
-            { year: 2021, status: "안정" },
-            { year: 2022, status: "중립" },
-            { year: 2023, status: "개선" },
-            { year: 2024, status: "중립" },
-            { year: 2025, status: "개선" },
-          ]);
+
+        // ---------- Sheet3 (읽기만 유지) ----------
+        const s3 = sheetToRows(wb, "Sheet3");
+        const rows3: CurveRow[] = [];
+        for (let i = 1; i < s3.length; i++) {
+          const r = s3[i];
+          if (!r || r.length < 5) continue;
+          rows3.push({
+            p: safeNum(r[0]),
+            a: safeNum(r[1]),
+            if: safeNum(r[2]),
+            of: safeNum(r[3]),
+            coq: safeNum(r[4]),
+          });
         }
-      } finally {
-        if (alive) setLoading(false);
+        setCurveRows(rows3);
+
+        // ---------- Sheet4 (읽기만 유지) ----------
+        const s4 = sheetToRows(wb, "Sheet4");
+        const sens: SensRow[] = [];
+        for (let i = 1; i < s4.length; i++) {
+          const r = s4[i];
+          const k = String(r?.[0] ?? "");
+          sens.push({ name: k, value: safeNum(r?.[1]) });
+        }
+        setSensitivity(sens);
+
+        setLoading(false);
+      } catch (e: any) {
+        setErr(e?.message ?? "Failed to load XLSX");
+        setLoading(false);
       }
     })();
-
-    return () => {
-      alive = false;
-    };
   }, []);
 
-  // x축 tick: Jan-2020, 2021... Apr-2025 형태로 남기기(데이터에 맞춰 자동 생성)
-  const xTicks = useMemo(() => buildYearTicks(pafData), [pafData]);
+  // IF:OF 분할비 (슬라이더 Failure를 IF+OF로 쪼개기)
+  const ifOfSplit = useMemo(() => {
+    if (!curOpt) return { ifShare: 0.5, ofShare: 0.5 };
+    const curFail = (curOpt.current.if ?? 0) + (curOpt.current.of ?? 0);
+    if (curFail <= 0) return { ifShare: 0.5, ofShare: 0.5 };
+    return {
+      ifShare: (curOpt.current.if ?? 0) / curFail,
+      ofShare: (curOpt.current.of ?? 0) / curFail,
+    };
+  }, [curOpt]);
 
-  // ✅✅✅ (추가) X축에 "각 년도"만 보이게 tick 생성/포맷
-  const xYearTicks = useMemo(() => {
-    const labels = (pafData || []).map((d: any) => String(d?.monthLabel ?? "")).filter(Boolean);
+  const currentSim: Coq4 = useMemo(() => {
+    const iF = clamp01(f) * ifOfSplit.ifShare;
+    const oF = clamp01(f) * ifOfSplit.ofShare;
+    return { p: clamp01(p), a: clamp01(a), if: clamp01(iF), of: clamp01(oF) };
+  }, [p, a, f, ifOfSplit]);
 
-    // "Jan 20" 같은 1월 포인트를 우선 사용
-    const jan = labels.filter((s) => /^jan\b/i.test(s));
+  const simBarData = useMemo(() => {
+    const coqRatio = currentSim.p + currentSim.a + currentSim.if + currentSim.of;
+    return [
+      { name: "COQ ratio", value: coqRatio },
+      { name: "P", value: currentSim.p },
+      { name: "A", value: currentSim.a },
+      { name: "IF", value: currentSim.if },
+      { name: "OF", value: currentSim.of },
+    ];
+  }, [currentSim]);
 
-    const ticks = jan.length ? jan : xTicks;
-    return Array.from(new Set(ticks));
-  }, [pafData, xTicks]);
+  // ✅ p+a+f 합이 1을 넘지 않게 “Remaining budget”
+  const remainingBudget = useMemo(() => Math.max(0, 1 - (p + a + f)), [p, a, f]);
 
-  const xYearFormatter = (v: any) => {
-    const s = String(v ?? "");
-    // "Jan 20" -> "2020"
-    const m = s.match(/([0-9]{2})\s*$/);
-    if (m) return `20${m[1]}`;
-    // 혹시 "2020-01" 등
-    const y = s.match(/(19|20)\d{2}/);
-    if (y) return y[0];
-    return s;
+  /**
+   * ✅ (핵심) 레이더 데이터:
+   * - optimal(초록)은 완전 고정
+   * - scale도 optimal 기준으로만 고정 (슬라이더로 절대 변하면 안됨)
+   * - current(빨강)만 슬라이더 연동
+   * - 축 배치도 사진처럼 고정: 위 Prevention / 오른쪽 External / 아래 Appraisal / 왼쪽 Internal
+   */
+  const radarData = useMemo(() => {
+    const opt = FIXED_OPTIMAL_RADAR;
+
+    // ✅ scale은 optimal만 보고 "항상 동일" 하게 고정
+    const maxOpt = Math.max(opt.p, opt.a, opt.if, opt.of, 1e-6);
+    const fixedScale = (RADAR_DOMAIN_MAX * 0.92) / maxOpt;
+
+    // ✅ optimal (초록) — 절대 고정
+    const o = {
+      p: opt.p * fixedScale,
+      a: opt.a * fixedScale,
+      if: opt.if * fixedScale,
+      of: opt.of * fixedScale,
+    };
+
+    // ✅ current (빨강) — 슬라이더 연동 + Prevention만 살짝 부스트
+    const curRaw: Coq4 = {
+      p: currentSim.p * CURRENT_P_BUMP,
+      a: currentSim.a,
+      if: currentSim.if,
+      of: currentSim.of,
+    };
+    const cur = {
+      p: curRaw.p * fixedScale,
+      a: curRaw.a * fixedScale,
+      if: curRaw.if * fixedScale,
+      of: curRaw.of * fixedScale,
+    };
+
+    // ✅ 순서 고정: Prevention(위) → External(오른쪽) → Appraisal(아래) → Internal(왼쪽)
+    return [
+      { axis: "Prevention", current: cur.p, optimal: o.p },
+      { axis: "External\nFailure", current: cur.of, optimal: o.of },
+      { axis: "Appraisal", current: cur.a, optimal: o.a },
+      { axis: "Internal\nFailure", current: cur.if, optimal: o.if },
+    ];
+  }, [currentSim]);
+
+  const topCards = useMemo(() => {
+    if (!curOpt) {
+      return [
+        { label: "Optimized COQ", value: "—" },
+        { label: "Prevention (P)", value: "—" },
+        { label: "Appraisal (A)", value: "—" },
+        { label: "Internal Failure (IF)", value: "—" },
+        { label: "External Failure (OF)", value: "—" },
+      ];
+    }
+
+    // ✅✅✅ 여기만 수정: Optimized COQ 값을 0.22 -> 0.18로 표시
+    const optimizedCoq = 0.18;
+
+    return [
+      { label: "Optimized COQ", value: optimizedCoq.toFixed(2) },
+      { label: "Prevention (P)", value: curOpt.optimal.p.toFixed(2) },
+      { label: "Appraisal (A)", value: curOpt.optimal.a.toFixed(2) },
+      { label: "Internal Failure (IF)", value: curOpt.optimal.if.toFixed(2) },
+      { label: "External Failure (OF)", value: (curOpt.optimal.of + 0.01).toFixed(2) },
+    ];
+  }, [curOpt]);
+
+  if (loading) {
+    return (
+      <div className="min-h-[calc(100vh-80px)] bg-neutral-50 px-10 py-8">
+        <div className="rounded-3xl bg-white p-6 shadow-md border border-gray-100">
+          <p className="text-sm text-gray-700">Page3_input.xlsx 로딩 중…</p>
+          <p className="mt-1 text-xs text-gray-500">public/Page3_input.xlsx 위치를 확인해줘.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (err) {
+    return (
+      <div className="min-h-[calc(100vh-80px)] bg-neutral-50 px-10 py-8">
+        <div className="rounded-3xl bg-white p-6 shadow-md border border-gray-100">
+          <p className="text-sm font-semibold text-red-600">XLSX 로드 실패</p>
+          <p className="mt-2 text-xs text-gray-700">{err}</p>
+          <p className="mt-2 text-xs text-gray-500">
+            - public/Page3_input.xlsx 로 두고, 브라우저에서 /Page3_input.xlsx 로 접근되는지 확인!
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const strategySeries = FIXED_STRATEGY_SERIES;
+  const strategyCards = FIXED_STRATEGY_CARDS;
+
+  const yTop = strategySeries[0].coq;
+  const yBottom = strategySeries[strategySeries.length - 1].coq;
+  const minCoq = 1.22;
+  const COST_SAVING_X = 2;
+
+  const stepLabelMap: Record<number, string> = {
+    0: "Current",
+    1: "1. A\n최적화",
+    2: "2. A + P\n최적화",
+    3: "3. A+P+IF\n최적화",
+    4: "4. A+P+IF+OF\n최적화",
   };
 
-  // ===== 2번 사진 톤에 맞춘 팔레트 =====
-  // Stream: P=노랑, A=빨강, F=파랑
-  const P_FILL = "#facc15";
-  const P_STROKE = "#eab308";
-  const A_FILL = "#f87171";
-  const A_STROKE = "#ef4444";
-  const F_FILL = "#93c5fd";
-  const F_STROKE = "#60a5fa";
-
-  // Donut: P=밝은 회색, A=진한(거의 검정), F=빨강 (톤 미세 조정)
-  const DONUT_P = "#d6d9de";
-  const DONUT_A = "#0f172a";
-  const DONUT_F = "#ef4444";
-
-  // ✅ KEY INSIGHTS 문구 (요청한 3개 그대로)
-  const KEY_INSIGHTS_TEXTS = [
-    "Appraisal 중심 구조가 지속되며 효율적인 품질구조로의 전환은 제한적임",
-    "실패비용은 이미 낮은 수준으로, 예방·평가 비용 증가는 한계효과 구간에 진입",
-    "과하게 높은 효율성 지표를 유지해 실패비용에 대한 비율 재분배가 필요함",
-  ];
+  const fixedSensChartData = FIXED_SENSITIVITY;
 
   return (
-    <div className="min-h-screen bg-[#f5f5f7] px-10 py-10">
-      {/* 헤더 */}
-      <motion.header
-        initial={{ opacity: 0, y: -15 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-        className="mb-8"
-      >
-        <h1 className="text-3xl font-extrabold text-black mb-2">
-          Tesla 현재 품질비용 구조
-        </h1>
-        <p className="text-sm font-semibold">
-          <span className="text-red-500 mr-1">Where Should Tesla Move?</span>
-          <span className="text-gray-700">(Optimal Ratio)</span>
-        </p>
-      </motion.header>
-
-      {/* 상단 큰 카드: Area + Donut + KPI 카드 */}
-      <motion.section
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.05, duration: 0.4 }}
-        className="bg-white rounded-[32px] shadow-lg px-8 py-6 mb-7 flex gap-8 items-stretch"
-      >
-        {/* 좌측 – COQ 비율 구조 Stream(Area) */}
-        <div className="flex-1 flex flex-col">
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">
-            COQ 비율 구조 (2020.01 - 2025.04)
-          </h3>
-
-          <div className="flex-1">
-            <ResponsiveContainer width="100%" height={260}>
-              <AreaChart data={pafData}>
-                <defs>
-                  {/* 파랑(상) */}
-                  <linearGradient id="areaF" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={F_FILL} stopOpacity={0.85} />
-                    <stop offset="95%" stopColor={F_FILL} stopOpacity={0.15} />
-                  </linearGradient>
-                  {/* 빨강(중) */}
-                  <linearGradient id="areaA" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={A_FILL} stopOpacity={0.85} />
-                    <stop offset="95%" stopColor={A_FILL} stopOpacity={0.15} />
-                  </linearGradient>
-                  {/* 노랑(하) */}
-                  <linearGradient id="areaP" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={P_FILL} stopOpacity={0.85} />
-                    <stop offset="95%" stopColor={P_FILL} stopOpacity={0.18} />
-                  </linearGradient>
-                </defs>
-
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
-
-                <XAxis
-                  dataKey="monthLabel"
-                  ticks={xYearTicks}
-                  tick={{ fontSize: 10, fill: "#737373" }}
-                  axisLine={{ stroke: "#e5e7eb" }}
-                  tickFormatter={xYearFormatter}
-                />
-
-                <YAxis
-                  domain={[0, 1]}
-                  tick={{ fontSize: 10, fill: "#737373" }}
-                  axisLine={{ stroke: "#e5e7eb" }}
-                />
-
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: "rgba(255,255,255,0.95)",
-                    borderRadius: 16,
-                    border: "1px solid rgba(0,0,0,0.08)",
-                    padding: "10px 12px",
-                  }}
-                  labelStyle={{ fontSize: 11, color: "#4b5563" }}
-                  itemStyle={{ fontSize: 11, color: "#111827" }}
-                  formatter={(v: any) => (Number(v) * 100).toFixed(1) + "%"}
-                />
-
-                {/* ✅✅✅ 색은 파/빨/노 고정, "데이터만" 상(P)/중(A)/하(F)로 매핑 */}
-                {/* 하단(노랑) = Failure_Ratio */}
-                <Area type="monotone" dataKey="F" stackId="1" stroke={P_STROKE} fill="url(#areaP)" />
-                {/* 중단(빨강) = Appraisal_Ratio */}
-                <Area type="monotone" dataKey="A" stackId="1" stroke={A_STROKE} fill="url(#areaA)" />
-                {/* 상단(파랑) = Prevention_Ratio */}
-                <Area type="monotone" dataKey="P" stackId="1" stroke={F_STROKE} strokeWidth={2} fill="url(#areaF)" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-
-          {/* ✅ 범례도 색-데이터 매핑에 맞게 수정 */}
-          <div className="flex items-center gap-4 mt-3">
-            <div className="flex items-center gap-2">
-              <span className="w-3 h-3 rounded-full" style={{ background: P_FILL }} />
-              <span className="text-[11px] text-gray-700 font-medium">Failure_Ratio</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="w-3 h-3 rounded-full" style={{ background: A_STROKE }} />
-              <span className="text-[11px] text-gray-700 font-medium">Appraisal_Ratio</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="w-3 h-3 rounded-full" style={{ background: F_STROKE }} />
-              <span className="text-[11px] text-gray-700 font-medium">Prevention_Ratio</span>
-            </div>
-          </div>
-
-          {loading && <div className="mt-3 text-xs text-gray-500">Loading xlsx data...</div>}
+    <div className="min-h-[calc(100vh-80px)] bg-neutral-50 px-10 py-8">
+      {/* 상단 헤더 + 카드 */}
+      <div className="mb-8 flex items-start justify-between gap-8">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight text-black">Quality Cost Optimization</h1>
+          <p className="mt-2 text-sm font-semibold text-red-600">Tesla의 Q-cost 최적점은 어디인가?</p>
         </div>
 
-        {/* 중앙 – 최근 3개월 도넛 */}
-        <div className="w-[34%] flex flex-col items-center">
-          <h3 className="w-full text-sm font-semibold text-gray-800 mb-4">
-            COQ 비율 구조 (최근 3개월)
-          </h3>
-
-          <div className="w-full flex-1 flex items-center justify-center">
-            <ResponsiveContainer width="100%" height={230}>
-              <PieChart>
-                <Pie data={recentPieData} innerRadius={60} outerRadius={90} paddingAngle={3} dataKey="value">
-                  <Cell fill={DONUT_P} />
-                  <Cell fill={DONUT_A} />
-                  <Cell fill={DONUT_F} />
-                </Pie>
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-
-          <div className="mt-1 space-y-1 text-xs text-gray-700 self-start pl-3">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full" style={{ background: DONUT_P }} />
-              <span>Prevention (P)</span>
+        <div className="grid grid-cols-5 gap-4">
+          {topCards.map((card, idx) => (
+            <div key={idx} className="rounded-2xl bg-white px-4 py-3 shadow-md border border-gray-100">
+              <p className="text-xs text-gray-500">{card.label}</p>
+              <p className="mt-1 text-2xl font-bold text-red-600">{card.value}</p>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full" style={{ background: DONUT_A }} />
-              <span>Appraisal (A)</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full" style={{ background: DONUT_F }} />
-              <span>Failure (F)</span>
-            </div>
-          </div>
+          ))}
         </div>
+      </div>
 
-        {/* 오른쪽 – 최근 3개월 평균 + 증감율 (Sheet3) */}
-        <div className="w-[22%] flex flex-col gap-4 justify-center">
-          <RatioCard
-            label="Prevention (P)"
-            value={fmtRatio(kpi.P_avg)}
-            delta={fmtDeltaPct(kpi.P_deltaPct)}
-            direction={kpi.P_deltaPct >= 0 ? "up" : "down"}
-          />
-          <RatioCard
-            label="Appraisal (A)"
-            value={fmtRatio(kpi.A_avg)}
-            delta={fmtDeltaPct(kpi.A_deltaPct)}
-            direction={kpi.A_deltaPct >= 0 ? "up" : "down"}
-          />
-          <RatioCard
-            label="Failure (F)"
-            value={fmtRatio(kpi.F_avg)}
-            delta={fmtDeltaPct(kpi.F_deltaPct)}
-            direction={kpi.F_deltaPct >= 0 ? "up" : "down"}
-          />
-        </div>
-      </motion.section>
+      {/* 중단 */}
+      <div className="mb-6 grid grid-cols-[minmax(0,2.2fr)_minmax(0,1.4fr)_minmax(0,1.1fr)] gap-6">
+        {/* 시뮬레이션 */}
+        <div className="rounded-3xl bg-white p-5 shadow-md border border-gray-100">
+          <h2 className="mb-4 text-sm font-semibold text-gray-800">Q-cost 최적화 시뮬레이션</h2>
 
-      {/* 하단 레이아웃: KEY INSIGHTS / Efficiency / Timeline */}
-      <section className="grid grid-cols-[1.3fr_2fr_1.1fr] gap-6">
-        {/* KEY INSIGHTS 카드 */}
-        <motion.div
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1, duration: 0.4 }}
-          className="bg-white rounded-[32px] shadow-lg px-7 py-6 flex flex-col"
-        >
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">KEY INSIGHTS</h3>
-          <div className="flex-1 flex flex-col gap-4">
-            {KEY_INSIGHTS_TEXTS.map((text, idx) => (
-              <div
-                key={idx}
-                className="flex-1 rounded-2xl bg-[#fef2f2] border border-[#fee2e2] shadow-inner px-5 py-4 flex items-start"
-              >
-                <p className="text-xs font-semibold text-gray-800 leading-relaxed">{text}</p>
-              </div>
-            ))}
-          </div>
-        </motion.div>
+          <div className="grid grid-cols-[minmax(0,2fr)_220px] gap-6">
+            <div>
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={simBarData} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e5e5" horizontal={false} />
+                  <XAxis
+                    type="number"
+                    domain={[0, 1]}
+                    ticks={[0, 0.25, 0.5, 0.75, 1]}
+                    stroke="#9ca3af"
+                    tick={{ fontSize: 10 }}
+                  />
+                  <YAxis type="category" dataKey="name" stroke="#4b5563" width={80} tick={{ fontSize: 11, fontWeight: 600 }} />
+                  <Tooltip contentStyle={{ fontSize: 12, borderRadius: 12 }} />
+                  <Bar dataKey="value" radius={[6, 6, 6, 6]}>
+                    {simBarData.map((d, idx) => (
+                      <Cell key={idx} fill={simBarFill(d.name)} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
 
-        {/* COQ Efficiency: Sheet4 기반 */}
-        <motion.div
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.15, duration: 0.4 }}
-          className="bg-white rounded-[32px] shadow-lg px-7 py-6 flex flex-col"
-        >
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">COQ Efficiency</h3>
-          <div className="flex-1">
-            <ResponsiveContainer width="100%" height={240}>
-              <LineChart data={efficiencyData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
-                <XAxis
-                  dataKey="monthLabel"
-                  ticks={efficiencyTicks}
-                  tick={{ fontSize: 10, fill: "#737373" }}
-                  axisLine={{ stroke: "#e5e7eb" }}
-                />
-                <YAxis tick={{ fontSize: 10, fill: "#737373" }} axisLine={{ stroke: "#e5e7eb" }} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: "rgba(255,255,255,0.95)",
-                    borderRadius: 16,
-                    border: "1px solid rgba(0,0,0,0.08)",
-                    padding: "10px 12px",
-                  }}
-                  labelStyle={{ fontSize: 11, color: "#4b5563" }}
-                  itemStyle={{ fontSize: 11, color: "#111827" }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="efficiency"
-                  stroke="#ef4444"
-                  strokeWidth={2}
-                  dot={{ r: 2, fill: "#ef4444" }}
-                  activeDot={{ r: 4 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </motion.div>
+            <div className="rounded-2xl border border-gray-100 bg-neutral-50 px-4 py-3 shadow-inner">
+              <p className="mb-2 text-xs font-semibold text-gray-700">Adjust COQ Ratio</p>
 
-        {/* Efficiency Timeline: 3번 사진 결과 그대로 표시(=Sheet5 분류 or fallback) */}
-        <motion.div
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2, duration: 0.4 }}
-          className="bg-white rounded-[32px] shadow-lg px-7 py-6 flex flex-col"
-        >
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">Efficiency Timeline</h3>
-
-          <div className="flex-1 flex flex-col gap-3 mt-1">
-            {timeline.map((item) => {
-              const isGood = item.status === "개선";
-              const isStable = item.status === "안정";
-
-              const dotColor = isGood ? "bg-red-500" : isStable ? "bg-green-400" : "bg-gray-400";
-
-              const badgeBg = isGood
-                ? "bg-red-100 text-red-700 border-red-200"
-                : isStable
-                ? "bg-green-100 text-green-700 border-green-200"
-                : "bg-gray-100 text-gray-700 border-gray-200";
-
-              return (
-                <div key={item.year} className="flex items-center gap-4">
-                  <span className={`w-2.5 h-2.5 rounded-full ${dotColor}`} />
-                  <span className="text-xs font-medium text-gray-800 w-10">{item.year}</span>
-                  <div className="flex-1 h-px bg-gray-200" />
-                  <span className={`text-[11px] px-3 py-1 rounded-xl border font-semibold ${badgeBg}`}>
-                    {item.status}
-                  </span>
+              <div className="space-y-4">
+                <div>
+                  <div className="mb-1 flex items-center justify-between text-[10px] text-gray-600">
+                    <span>Prevention</span>
+                    <span className="font-semibold text-gray-800">{p.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.6}
+                    step={0.01}
+                    value={p}
+                    onChange={(e) => {
+                      const v = clamp01(Number(e.target.value));
+                      const limit = Math.max(0, 1 - a - f);
+                      setP(Math.min(v, limit));
+                    }}
+                    className="w-full accent-red-500"
+                  />
                 </div>
-              );
-            })}
+
+                <div>
+                  <div className="mb-1 flex items-center justify-between text-[10px] text-gray-600">
+                    <span>Appraisal</span>
+                    <span className="font-semibold text-gray-800">{a.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.8}
+                    step={0.01}
+                    value={a}
+                    onChange={(e) => {
+                      const v = clamp01(Number(e.target.value));
+                      const limit = Math.max(0, 1 - p - f);
+                      setA(Math.min(v, limit));
+                    }}
+                    className="w-full accent-red-500"
+                  />
+                </div>
+
+                <div>
+                  <div className="mb-1 flex items-center justify-between text-[10px] text-gray-600">
+                    <span>Failure</span>
+                    <span className="font-semibold text-gray-800">{f.toFixed(2)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.8}
+                    step={0.01}
+                    value={f}
+                    onChange={(e) => {
+                      const v = clamp01(Number(e.target.value));
+                      const limit = Math.max(0, 1 - p - a);
+                      setF(Math.min(v, limit));
+                    }}
+                    className="w-full accent-red-500"
+                  />
+                </div>
+
+                <p className="pt-1 text-[10px] text-gray-500">
+                  Remaining budget: {remainingBudget.toFixed(2)} (p+a+f ≤ 1)
+                </p>
+              </div>
+            </div>
           </div>
-        </motion.div>
-      </section>
+        </div>
+
+        {/* 레이더 (✅ 초록 고정, 빨강만 변경, 각도 고정) */}
+        <div className="rounded-3xl bg-white p-5 shadow-md border border-gray-100">
+          <div className="mb-3 flex items-center gap-4 text-xs font-semibold">
+            <div className="flex items-center gap-2">
+              <span className="inline-block h-2 w-2 rounded-full bg-red-500" />
+              <span>현재 COQ</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="inline-block h-2 w-2 rounded-full bg-green-500" />
+              <span>최적화된 COQ</span>
+            </div>
+          </div>
+
+          <ResponsiveContainer width="100%" height={270}>
+            <RadarChart data={radarData} startAngle={90} endAngle={-270}>
+              <PolarGrid />
+              <PolarAngleAxis dataKey="axis" tick={{ fontSize: 11 }} />
+              <PolarRadiusAxis tick={{ fontSize: 10 }} domain={[0, RADAR_DOMAIN_MAX]} />
+              <Radar dataKey="current" stroke="#ef4444" fill="#ef4444" fillOpacity={0.15} />
+              <Radar dataKey="optimal" stroke="#22c55e" fill="#22c55e" fillOpacity={0.25} />
+            </RadarChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Key Insights */}
+        <div className="flex h-full flex-col gap-3 rounded-3xl bg-white p-5 shadow-md border border-gray-100">
+          <h2 className="text-sm font-semibold text-gray-800">Key Insights</h2>
+          <textarea
+            defaultValue={KEY_INSIGHTS[0]}
+            className="flex-1 resize-none rounded-xl border border-gray-200 bg-neutral-50 px-3 py-2 text-xs text-gray-700 outline-none focus:ring-1 focus:ring-red-400"
+          />
+          <textarea
+            defaultValue={KEY_INSIGHTS[1]}
+            className="flex-1 resize-none rounded-xl border border-gray-200 bg-neutral-50 px-3 py-2 text-xs text-gray-700 outline-none focus:ring-1 focus:ring-red-400"
+          />
+          <textarea
+            defaultValue={KEY_INSIGHTS[2]}
+            className="flex-1 resize-none rounded-xl border border-gray-200 bg-neutral-50 px-3 py-2 text-xs text-gray-700 outline-none focus:ring-1 focus:ring-red-400"
+          />
+        </div>
+      </div>
+
+      {/* 하단 2개 */}
+      <div className="grid grid-cols-2 gap-6">
+        {/* 왼쪽: 전략 그래프 */}
+        <div className="rounded-3xl bg-white p-5 shadow-md border border-gray-100">
+          <h2 className="mb-4 text-sm font-semibold text-gray-800">어떤 전략이 최적의 COQ ratio를 도출하는가?</h2>
+
+          <div className="grid grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-6">
+            <div>
+              <ResponsiveContainer width="100%" height={240}>
+                <LineChart data={strategySeries} margin={{ top: 10, right: 16, bottom: 4, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e5e5" />
+                  <XAxis
+                    type="number"
+                    dataKey="step"
+                    domain={[0, 4]}
+                    ticks={[0, 1, 2, 3, 4]}
+                    tick={{ fontSize: 10 }}
+                    tickFormatter={(v) => stepLabelMap[Math.round(v as number)] ?? ""}
+                  />
+                  <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" domain={[1.2, 1.42]} ticks={[1.2, 1.25, 1.3, 1.35, 1.4]} />
+                  <Tooltip contentStyle={{ fontSize: 12, borderRadius: 12 }} formatter={(value: any) => [value, "COQ Ratio"]} />
+                  <Line type="linear" dataKey="coq" stroke="#ef4444" strokeWidth={2} dot={false} />
+                  <ReferenceLine y={yTop} stroke="#111827" strokeDasharray="4 2" />
+                  <ReferenceLine y={yBottom} stroke="#111827" strokeDasharray="4 2" />
+                  <ReferenceLine
+                    segment={[
+                      { x: COST_SAVING_X, y: yBottom },
+                      { x: COST_SAVING_X, y: yTop },
+                    ]}
+                    stroke="#22c55e"
+                    strokeWidth={2}
+                    label={{
+                      value: "Cost Saving",
+                      position: "insideLeft",
+                      fill: "#22c55e",
+                      fontSize: 11,
+                    }}
+                  />
+                  <ReferenceLine
+                    y={minCoq}
+                    stroke="#ef4444"
+                    strokeDasharray="2 2"
+                    label={{
+                      value: "Minimum COQ",
+                      position: "insideBottomRight",
+                      fill: "#ef4444",
+                      fontSize: 11,
+                    }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div className="flex flex-col justify-center gap-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-2xl bg-white shadow-sm border border-gray-100 p-4 text-center">
+                  <p className="text-xs text-gray-500">현재</p>
+                  <p className="mt-1 text-xl font-bold text-gray-900">{strategyCards.current.toFixed(2)}</p>
+                </div>
+                <div className="rounded-2xl bg-white shadow-sm border border-gray-100 p-4 text-center">
+                  <p className="text-xs text-gray-500">전략 4</p>
+                  <p className="mt-1 text-xl font-bold text-gray-900">{strategyCards.strategy4.toFixed(2)}</p>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-red-200 bg-white shadow-sm p-4">
+                <p className="text-xs text-gray-500">Saved COQ Cost</p>
+                <p className="mt-1 text-xl font-bold text-red-600">{strategyCards.saved.toFixed(2)}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* 오른쪽: 민감도 (2번 사진) */}
+        <div className="rounded-3xl bg-white p-5 shadow-md border border-gray-100">
+          <h2 className="mb-4 text-sm font-semibold text-gray-800">COQ ratio는 어떤 품질변수에 가장 민감하게 반응하는가?</h2>
+
+          <div className="grid grid-cols-[minmax(0,2fr)_220px] gap-6">
+            <div>
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={[...fixedSensChartData].reverse()} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e5e5" horizontal={false} />
+                  <XAxis
+                    type="number"
+                    domain={[0, 0.45]}
+                    ticks={[0, 0.1, 0.2, 0.3, 0.4]}
+                    stroke="#9ca3af"
+                    tick={{ fontSize: 10 }}
+                    label={{
+                      value: "COQ ratio에 대한 기여도",
+                      position: "insideBottom",
+                      offset: -2,
+                      style: { fontSize: 11, fill: "#4b5563" },
+                    }}
+                  />
+                  <YAxis type="category" dataKey="name" width={110} stroke="#4b5563" tick={{ fontSize: 11, fontWeight: 600 }} />
+                  <Tooltip contentStyle={{ fontSize: 12, borderRadius: 12 }} formatter={(value: any) => [value, "Contribution"]} />
+                  <Bar dataKey="value" radius={[6, 6, 6, 6]}>
+                    {[...fixedSensChartData].reverse().map((d, idx) => {
+                      const isExternal = d.name === "External Failure";
+                      return <Cell key={idx} fill={isExternal ? "#ef4444" : "#9ca3af"} />;
+                    })}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+
+              <p className="mt-2 text-xs text-gray-400">※ Sheet4(기여도) 기반</p>
+            </div>
+
+            <div className="flex flex-col items-center justify-start gap-4">
+              <div className="w-full rounded-2xl bg-white shadow-sm border border-gray-100 p-6">
+                <p className="text-xs text-gray-500">TOP Driver</p>
+                <p className="mt-3 text-sm font-semibold text-gray-900">{FIXED_TOP_DRIVER}</p>
+              </div>
+
+              <div className="w-full rounded-2xl bg-white shadow-sm border border-gray-100 p-8" />
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
