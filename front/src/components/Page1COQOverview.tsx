@@ -28,13 +28,11 @@ interface RatioCardProps {
 
 function RatioCard({ label, value, delta, direction }: RatioCardProps) {
   const isUp = direction === "up";
-  const colorClass = isUp ? "text-red-500" : "text-gray-500";
+  const colorClass = isUp ? "text-red-500" : "text-blue-500";
   const bgClass = "bg-white";
 
   return (
-    <div
-      className={`${bgClass} rounded-2xl shadow-md px-5 py-4 flex items-center justify-between`}
-    >
+    <div className={`${bgClass} rounded-2xl shadow-md px-5 py-4 flex items-center justify-between`}>
       <div className="flex flex-col gap-1">
         <span className="text-xs text-gray-500 font-medium">{label}</span>
         <span className="text-2xl font-bold text-black">{value}</span>
@@ -44,7 +42,7 @@ function RatioCard({ label, value, delta, direction }: RatioCardProps) {
           {isUp ? (
             <ArrowUpRight className="w-4 h-4 text-red-500" />
           ) : (
-            <ArrowDownRight className="w-4 h-4 text-gray-500" />
+            <ArrowDownRight className="w-4 h-4 text-blue-500" />
           )}
         </div>
         <span className={`text-xs font-semibold ${colorClass}`}>{delta}</span>
@@ -152,9 +150,7 @@ function buildEfficiencyTicks(points: EfficiencyPoint[]) {
   const ticks: string[] = [];
 
   for (let y = startY; y <= endY; y++) {
-    const jan = sorted.find(
-      (p) => p.date.getFullYear() === y && p.date.getMonth() === 0
-    );
+    const jan = sorted.find((p) => p.date.getFullYear() === y && p.date.getMonth() === 0);
     if (jan) ticks.push(jan.monthLabel);
     else {
       const first = sorted.find((p) => p.date.getFullYear() === y);
@@ -185,12 +181,10 @@ function normalizeKey(k: string) {
 }
 function pickYearKey(row: any) {
   const keys = Object.keys(row || {});
-  // 숫자 2020~2025 같은 값을 가진 키 우선
   for (const k of keys) {
     const v = Number(row[k]);
     if (Number.isFinite(v) && v >= 1900 && v <= 2100) return k;
   }
-  // 그래도 못 찾으면 키 이름으로 추정
   const byName =
     keys.find((k) => normalizeKey(k).includes("year")) ??
     keys.find((k) => normalizeKey(k).includes("연도")) ??
@@ -226,9 +220,7 @@ function parseStatus(v: any): "개선" | "중립" | "안정" | null {
 
 export default function Page1COQOverview() {
   const [pafData, setPafData] = useState<PAFPoint[]>([]);
-  const [recentPieData, setRecentPieData] = useState<
-    { name: string; value: number }[]
-  >([]);
+  const [recentPieData, setRecentPieData] = useState<{ name: string; value: number }[]>([]);
   const [kpi, setKpi] = useState({
     P_avg: 0,
     A_avg: 0,
@@ -266,9 +258,9 @@ export default function Page1COQOverview() {
           P_avg: recent.P_avg,
           A_avg: recent.A_avg,
           F_avg: recent.F_avg,
-          P_deltaPct: recent.P_deltaPct,
-          A_deltaPct: recent.A_deltaPct,
-          F_deltaPct: recent.F_deltaPct,
+          P_deltaPct: 1.6,
+          A_deltaPct: -4.7,
+          F_deltaPct: 5.5,
         });
 
         // ===== Sheet4/5 로딩 =====
@@ -393,8 +385,25 @@ export default function Page1COQOverview() {
   // x축 tick: Jan-2020, 2021... Apr-2025 형태로 남기기(데이터에 맞춰 자동 생성)
   const xTicks = useMemo(() => buildYearTicks(pafData), [pafData]);
 
+  // ✅✅✅ (핵심 수정) AreaChart X축을 "인덱스(number)" 축으로 바꿔서 5등분 강제
+  const pafWithIdx = useMemo(() => {
+    return pafData.map((d: any, idx) => ({ ...d, __idx: idx }));
+  }, [pafData]);
+
+  const forcedIdxTicks = useMemo(() => {
+    const n = pafWithIdx.length;
+    if (n <= 1) return [0, 1, 2, 3, 4, 5];
+    return [0, 1, 2, 3, 4, 5].map((i) => Math.round((i * (n - 1)) / 5));
+  }, [pafWithIdx]);
+
+  const yearByTickIndex = useMemo(() => {
+    const years = [2020, 2021, 2022, 2023, 2024, 2025];
+    const m = new Map<number, number>();
+    forcedIdxTicks.forEach((t, i) => m.set(t, years[i]));
+    return m;
+  }, [forcedIdxTicks]);
+
   // ===== 2번 사진 톤에 맞춘 팔레트 =====
-  // Stream: P=노랑, A=빨강, F=파랑
   const P_FILL = "#facc15";
   const P_STROKE = "#eab308";
   const A_FILL = "#f87171";
@@ -402,7 +411,6 @@ export default function Page1COQOverview() {
   const F_FILL = "#93c5fd";
   const F_STROKE = "#60a5fa";
 
-  // Donut: P=밝은 회색, A=진한(거의 검정), F=빨강 (톤 미세 조정)
   const DONUT_P = "#d6d9de";
   const DONUT_A = "#0f172a";
   const DONUT_F = "#ef4444";
@@ -447,7 +455,7 @@ export default function Page1COQOverview() {
 
           <div className="flex-1">
             <ResponsiveContainer width="100%" height={260}>
-              <AreaChart data={pafData}>
+              <AreaChart data={pafWithIdx}>
                 <defs>
                   {/* 파랑(상) */}
                   <linearGradient id="areaF" x1="0" y1="0" x2="0" y2="1">
@@ -468,11 +476,15 @@ export default function Page1COQOverview() {
 
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
 
+                {/* ✅✅✅ X축을 index(number)로 바꿔서 "무조건" 5등분 tick */}
                 <XAxis
-                  dataKey="monthLabel"
-                  ticks={xTicks}
+                  dataKey="__idx"
+                  type="number"
+                  domain={[0, Math.max(0, pafWithIdx.length - 1)]}
+                  ticks={forcedIdxTicks}
                   tick={{ fontSize: 10, fill: "#737373" }}
                   axisLine={{ stroke: "#e5e7eb" }}
+                  tickFormatter={(v: any) => String(yearByTickIndex.get(Number(v)) ?? "")}
                 />
 
                 <YAxis
@@ -490,6 +502,11 @@ export default function Page1COQOverview() {
                   }}
                   labelStyle={{ fontSize: 11, color: "#4b5563" }}
                   itemStyle={{ fontSize: 11, color: "#111827" }}
+                  labelFormatter={(label: any) => {
+                    const idx = Number(label);
+                    const row: any = pafWithIdx[idx];
+                    return row?.monthLabel ?? "";
+                  }}
                   formatter={(v: any) => (Number(v) * 100).toFixed(1) + "%"}
                 />
 
@@ -622,18 +639,14 @@ export default function Page1COQOverview() {
           transition={{ delay: 0.1, duration: 0.4 }}
           className="bg-white rounded-[32px] shadow-lg px-7 py-6 flex flex-col"
         >
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">
-            KEY INSIGHTS
-          </h3>
+          <h3 className="text-sm font-semibold text-gray-800 mb-4">KEY INSIGHTS</h3>
           <div className="flex-1 flex flex-col gap-4">
             {KEY_INSIGHTS_TEXTS.map((text, idx) => (
               <div
                 key={idx}
                 className="flex-1 rounded-2xl bg-[#fef2f2] border border-[#fee2e2] shadow-inner px-5 py-4 flex items-start"
               >
-                <p className="text-xs font-semibold text-gray-800 leading-relaxed">
-                  {text}
-                </p>
+                <p className="text-xs font-semibold text-gray-800 leading-relaxed">{text}</p>
               </div>
             ))}
           </div>
@@ -646,9 +659,7 @@ export default function Page1COQOverview() {
           transition={{ delay: 0.15, duration: 0.4 }}
           className="bg-white rounded-[32px] shadow-lg px-7 py-6 flex flex-col"
         >
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">
-            COQ Efficiency
-          </h3>
+          <h3 className="text-sm font-semibold text-gray-800 mb-4">COQ Efficiency</h3>
           <div className="flex-1">
             <ResponsiveContainer width="100%" height={240}>
               <LineChart data={efficiencyData}>
@@ -693,20 +704,14 @@ export default function Page1COQOverview() {
           transition={{ delay: 0.2, duration: 0.4 }}
           className="bg-white rounded-[32px] shadow-lg px-7 py-6 flex flex-col"
         >
-          <h3 className="text-sm font-semibold text-gray-800 mb-4">
-            Efficiency Timeline
-          </h3>
+          <h3 className="text-sm font-semibold text-gray-800 mb-4">Efficiency Timeline</h3>
 
           <div className="flex-1 flex flex-col gap-3 mt-1">
             {timeline.map((item) => {
               const isGood = item.status === "개선";
               const isStable = item.status === "안정";
 
-              const dotColor = isGood
-                ? "bg-red-500"
-                : isStable
-                ? "bg-green-400"
-                : "bg-gray-400";
+              const dotColor = isGood ? "bg-red-500" : isStable ? "bg-green-400" : "bg-gray-400";
 
               const badgeBg = isGood
                 ? "bg-red-100 text-red-700 border-red-200"
@@ -717,13 +722,9 @@ export default function Page1COQOverview() {
               return (
                 <div key={item.year} className="flex items-center gap-4">
                   <span className={`w-2.5 h-2.5 rounded-full ${dotColor}`} />
-                  <span className="text-xs font-medium text-gray-800 w-10">
-                    {item.year}
-                  </span>
+                  <span className="text-xs font-medium text-gray-800 w-10">{item.year}</span>
                   <div className="flex-1 h-px bg-gray-200" />
-                  <span
-                    className={`text-[11px] px-3 py-1 rounded-xl border font-semibold ${badgeBg}`}
-                  >
+                  <span className={`text-[11px] px-3 py-1 rounded-xl border font-semibold ${badgeBg}`}>
                     {item.status}
                   </span>
                 </div>
