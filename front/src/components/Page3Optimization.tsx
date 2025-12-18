@@ -66,8 +66,8 @@ const FIXED_STRATEGY_SERIES = [
 
 const FIXED_STRATEGY_CARDS = {
   current: 0.4,
-  strategy4: 0.22,
-  saved: 0.18,
+  strategy4: 0.18,
+  saved: 0.22,
 };
 
 /**
@@ -99,7 +99,7 @@ function simBarFill(name: string) {
  * ✅ optimal(초록)은 완전 고정 (슬라이더로 절대 변하면 안됨)
  * ✅ current(빨강)만 슬라이더 연동
  */
-const FIXED_OPTIMAL_RADAR: Coq4 = { p: 0.16, if: 0.1, a: 0.14, of: 0.11 } as const;
+const FIXED_OPTIMAL_RADAR: Coq4 = { p: 0.16, if: 0.10, a: 0.14, of: 0.11 } as const;
 
 // 레이더 스케일 고정(마름모 “작아지는” 문제 해결용)
 const RADAR_DOMAIN_MAX = 0.22;
@@ -296,18 +296,28 @@ export default function Page3Optimization() {
     ];
   }, [currentSim]);
 
-  // ✅✅✅ (수정된 부분) 상단 카드 숫자를 슬라이더(currentSim)에 연동
   const topCards = useMemo(() => {
-    const coqRatio = currentSim.p + currentSim.a + currentSim.if + currentSim.of;
+    if (!curOpt) {
+      return [
+        { label: "Optimized COQ", value: "—" },
+        { label: "Prevention (P)", value: "—" },
+        { label: "Appraisal (A)", value: "—" },
+        { label: "Internal Failure (IF)", value: "—" },
+        { label: "External Failure (OF)", value: "—" },
+      ];
+    }
+
+    // ✅✅✅ 여기만 수정: Optimized COQ 값을 0.22 -> 0.18로 표시
+    const optimizedCoq = 0.18;
 
     return [
-      { label: "Optimized COQ", value: coqRatio.toFixed(2) },
-      { label: "Prevention (P)", value: currentSim.p.toFixed(2) },
-      { label: "Appraisal (A)", value: currentSim.a.toFixed(2) },
-      { label: "Internal Failure (IF)", value: currentSim.if.toFixed(2) },
-      { label: "External Failure (OF)", value: currentSim.of.toFixed(2) },
+      { label: "Optimized COQ", value: optimizedCoq.toFixed(2) },
+      { label: "Prevention (P)", value: curOpt.optimal.p.toFixed(2) },
+      { label: "Appraisal (A)", value: curOpt.optimal.a.toFixed(2) },
+      { label: "Internal Failure (IF)", value: curOpt.optimal.if.toFixed(2) },
+      { label: "External Failure (OF)", value: (curOpt.optimal.of + 0.01).toFixed(2) },
     ];
-  }, [currentSim]);
+  }, [curOpt]);
 
   if (loading) {
     return (
@@ -389,13 +399,7 @@ export default function Page3Optimization() {
                     stroke="#9ca3af"
                     tick={{ fontSize: 10 }}
                   />
-                  <YAxis
-                    type="category"
-                    dataKey="name"
-                    stroke="#4b5563"
-                    width={80}
-                    tick={{ fontSize: 11, fontWeight: 600 }}
-                  />
+                  <YAxis type="category" dataKey="name" stroke="#4b5563" width={80} tick={{ fontSize: 11, fontWeight: 600 }} />
                   <Tooltip contentStyle={{ fontSize: 12, borderRadius: 12 }} />
                   <Bar dataKey="value" radius={[6, 6, 6, 6]}>
                     {simBarData.map((d, idx) => (
@@ -492,12 +496,7 @@ export default function Page3Optimization() {
           </div>
 
           <ResponsiveContainer width="100%" height={270}>
-            <RadarChart
-              data={radarData}
-              // ✅ 축 위치(각도) 고정: 첫 항목(Prevention)을 "위"로
-              startAngle={90}
-              endAngle={-270}
-            >
+            <RadarChart data={radarData} startAngle={90} endAngle={-270}>
               <PolarGrid />
               <PolarAngleAxis dataKey="axis" tick={{ fontSize: 11 }} />
               <PolarRadiusAxis tick={{ fontSize: 10 }} domain={[0, RADAR_DOMAIN_MAX]} />
@@ -544,12 +543,7 @@ export default function Page3Optimization() {
                     tick={{ fontSize: 10 }}
                     tickFormatter={(v) => stepLabelMap[Math.round(v as number)] ?? ""}
                   />
-                  <YAxis
-                    tick={{ fontSize: 10 }}
-                    stroke="#9ca3af"
-                    domain={[1.2, 1.42]}
-                    ticks={[1.2, 1.25, 1.3, 1.35, 1.4]}
-                  />
+                  <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" domain={[1.2, 1.42]} ticks={[1.2, 1.25, 1.3, 1.35, 1.4]} />
                   <Tooltip contentStyle={{ fontSize: 12, borderRadius: 12 }} formatter={(value: any) => [value, "COQ Ratio"]} />
                   <Line type="linear" dataKey="coq" stroke="#ef4444" strokeWidth={2} dot={false} />
                   <ReferenceLine y={yTop} stroke="#111827" strokeDasharray="4 2" />
